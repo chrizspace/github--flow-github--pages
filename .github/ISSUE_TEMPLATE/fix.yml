@@ -1,0 +1,43 @@
+name: Bug fix
+description: Non-critical bug. Creates a fix/* branch off dev.
+title: "[Fix] "
+labels: ["type:fix"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Not urgent enough to bypass `dev`? Then this is the right template.
+        For something broken in production right now, use **Hotfix** instead.
+        Remember to assign a **Milestone**.
+  - type: textarea
+    id: current
+    attributes:
+      label: Current behaviour
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behaviour
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      value: |
+        1.
+        2.
+        3.
+  - type: input
+    id: branch
+    attributes:
+      label: Planned branch name
+      placeholder: fix/<issue-number>-short-description
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checklist
+      options:
+        - label: I have assigned this issue to a milestone
+          required: true

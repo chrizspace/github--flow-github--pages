@@ -1,0 +1,39 @@
+name: Hotfix
+description: Urgent production issue. Creates a hotfix/* branch off prod.
+title: "[Hotfix] "
+labels: ["type:hotfix"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        ⚠️ The `type:hotfix` label routes this issue's closure straight to a
+        **production deploy** and opens backport PRs to `release` and `dev`.
+        Only use it for something broken in production right now.
+        A **Milestone** is still required.
+  - type: textarea
+    id: impact
+    attributes:
+      label: Production impact
+      description: What is broken, for whom, and how badly?
+    validations:
+      required: true
+  - type: textarea
+    id: fix
+    attributes:
+      label: Proposed fix
+    validations:
+      required: true
+  - type: input
+    id: branch
+    attributes:
+      label: Planned branch name
+      placeholder: hotfix/<issue-number>-short-description
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checklist
+      options:
+        - label: This branches off `prod`, not `dev`
+          required: true
+        - label: I have assigned this issue to a milestone
+          required: true

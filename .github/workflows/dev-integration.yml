@@ -1,0 +1,87 @@
+name: Dev integration
+
+# PATCH bump + Dev deploy. Fires on the issue being closed by a merged PR,
+# not on the merge itself (see the DevOps plan, section 2).
+on:
+  issues:
+    types: [closed]
+
+permissions:
+  contents: write
+  issues: read
+  pull-requests: read
+
+concurrency:
+  group: dev-integration
+  cancel-in-progress: false
+
+jobs:
+  patch-release:
+    name: PATCH bump and deploy to Dev
+    # Skip "not planned" closes and anything routed to hotfix.yml.
+    if: >-
+      github.event.issue.state_reason == 'completed' &&
+      !contains(toJSON(github.event.issue.labels.*.name), 'type:hotfix')
+    runs-on: ubuntu-latest
+    environment: dev
+    steps:
+      # Needed before any local composite action can be used.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Resolve the merged PR that closed the issue
+        id: pr
+        uses: ./.github/actions/resolve-closing-pr
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          issue_number: ${{ github.event.issue.number }}
+          expected_base: dev
+
+      - name: Check out the exact merge commit
+        run: git checkout --detach ${{ steps.pr.outputs.sha }}
+
+      - name: Compute version
+        id: version
+        uses: ./.github/actions/compute-version
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          bump: patch
+
+      - name: Run tests
+        run: |
+          set -euo pipefail
+          node --check src/app.js
+          bash -n build.sh
+          echo "Tests OK."
+
+      - name: Tag the merge commit
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.version.outputs.tag }}
+          SHA: ${{ steps.pr.outputs.sha }}
+        run: |
+          set -euo pipefail
+          if git rev-parse -q --verify "refs/tags/${TAG}" >/dev/null; then
+            echo "::warning::Tag ${TAG} already exists — not re-tagging."
+            exit 0
+          fi
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "${TAG}" "${SHA}" -m "PATCH ${TAG} — closes #${{ github.event.issue.number }}"
+          git push origin "${TAG}"
+
+      - name: Deploy to Cloudflare Pages (Dev)
+        uses: ./.github/actions/deploy-pages
+        with:
+          project_name: ${{ vars.CLOUDFLARE_PROJECT_NAME || github.event.repository.name }}
+          branch: dev
+          environment: dev
+          version: ${{ steps.version.outputs.version }}
+          tag: ${{ steps.version.outputs.tag }}
+          commit: ${{ steps.pr.outputs.sha }}
+          api_token: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          account_id: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+
+      # Deliberately silent: no release, no announcement. The changelog entry
+      # is the tag itself, harvested later by milestone-release.yml.

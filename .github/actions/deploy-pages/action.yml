@@ -1,0 +1,101 @@
+name: Deploy to Cloudflare Pages
+description: >-
+  Builds dist/ (with the computed version baked into version.json) and deploys
+  it to the single Cloudflare Pages project as a branch deployment. No-ops with
+  a warning when the Cloudflare secrets are not configured yet.
+
+inputs:
+  project_name:
+    description: Cloudflare Pages project name.
+    required: true
+  branch:
+    description: >-
+      Cloudflare Pages branch name. Must be the project's production branch
+      (prod) for a production deployment; anything else deploys as a preview.
+    required: true
+  environment:
+    description: Logical environment shown on the status page (dev / uat / production).
+    required: true
+  version:
+    description: Computed version.
+    required: true
+  tag:
+    description: Git tag for this build.
+    required: false
+    default: none
+  commit:
+    description: Commit SHA being deployed.
+    required: true
+  api_token:
+    description: CLOUDFLARE_API_TOKEN (Pages:Edit).
+    required: false
+    default: ""
+  account_id:
+    description: CLOUDFLARE_ACCOUNT_ID.
+    required: false
+    default: ""
+
+outputs:
+  url:
+    description: Deployment URL, empty when the deploy was skipped.
+    value: ${{ steps.deploy.outputs.url }}
+
+runs:
+  using: composite
+  steps:
+    - name: Build site
+      shell: bash
+      env:
+        VERSION: ${{ inputs.version }}
+        TAG: ${{ inputs.tag }}
+        COMMIT: ${{ inputs.commit }}
+        BRANCH: ${{ inputs.branch }}
+        ENVIRONMENT: ${{ inputs.environment }}
+        REPOSITORY: ${{ github.repository }}
+      run: ./build.sh
+
+    - name: Deploy
+      id: deploy
+      shell: bash
+      env:
+        CLOUDFLARE_API_TOKEN: ${{ inputs.api_token }}
+        CLOUDFLARE_ACCOUNT_ID: ${{ inputs.account_id }}
+        PROJECT: ${{ inputs.project_name }}
+        BRANCH: ${{ inputs.branch }}
+      run: |
+        set -euo pipefail
+
+        if [ -z "${CLOUDFLARE_API_TOKEN}" ] || [ -z "${CLOUDFLARE_ACCOUNT_ID}" ]; then
+          echo "::warning::CLOUDFLARE_API_TOKEN / CLOUDFLARE_ACCOUNT_ID are not set — skipping the Cloudflare Pages deploy. See docs/DEVOPS.md."
+          echo "url=" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+
+        npx --yes wrangler@3 pages deploy dist \
+          --project-name "${PROJECT}" \
+          --branch "${BRANCH}" \
+          --commit-dirty=true | tee deploy.log
+
+        url="$(grep -Eo 'https://[a-zA-Z0-9./_-]+\.pages\.dev' deploy.log | tail -n 1 || true)"
+        echo "url=${url}" >> "$GITHUB_OUTPUT"
+
+    - name: Summary
+      shell: bash
+      env:
+        VERSION: ${{ inputs.version }}
+        ENVIRONMENT: ${{ inputs.environment }}
+        BRANCH: ${{ inputs.branch }}
+        COMMIT: ${{ inputs.commit }}
+        URL: ${{ steps.deploy.outputs.url }}
+      run: |
+        {
+          echo "### Deployment"
+          echo ""
+          echo "| field | value |"
+          echo "|---|---|"
+          echo "| version | \`${VERSION}\` |"
+          echo "| environment | \`${ENVIRONMENT}\` |"
+          echo "| branch | \`${BRANCH}\` |"
+          echo "| commit | \`${COMMIT}\` |"
+          echo "| url | ${URL:-_skipped_} |"
+        } >> "$GITHUB_STEP_SUMMARY"

@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Release status</title>
+    <link rel="stylesheet" href="./styles.css" />
+    <link
+      rel="icon"
+      href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><text y='14'>🚀</text></svg>"
+    />
+  </head>
+  <body>
+    <main class="card">
+      <header class="card__head">
+        <h1>Release status</h1>
+        <span id="env" class="badge badge--unknown">…</span>
+      </header>
+
+      <dl class="grid">
+        <div class="row">
+          <dt>VERSION</dt>
+          <dd id="version" class="mono mono--big">…</dd>
+        </div>
+        <div class="row">
+          <dt>GITHUB TAG</dt>
+          <dd id="tag" class="mono">…</dd>
+        </div>
+        <div class="row">
+          <dt>COMMIT</dt>
+          <dd id="commit" class="mono">…</dd>
+        </div>
+        <div class="row">
+          <dt>BRANCH</dt>
+          <dd id="branch" class="mono">…</dd>
+        </div>
+      </dl>
+
+      <footer class="card__foot">
+        <span id="built">built at …</span>
+        <a id="repo-link" href="#" rel="noreferrer">repository</a>
+      </footer>
+    </main>
+
+    <script src="./app.js"></script>
+  </body>
+</html>

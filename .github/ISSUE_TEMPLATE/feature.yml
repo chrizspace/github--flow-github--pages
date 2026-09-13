@@ -1,0 +1,41 @@
+name: Feature
+description: New functionality. Creates a feature/* branch off dev.
+title: "[Feature] "
+labels: ["type:feature"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Before you submit:** assign this issue to a **Milestone**. A missing
+        milestone makes the PR's required CI check fail, and the release
+        automation cannot categorize the work without it.
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: What should exist that does not exist today?
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      value: |
+        - [ ]
+    validations:
+      required: true
+  - type: input
+    id: branch
+    attributes:
+      label: Planned branch name
+      description: Use the issue number, e.g. feature/123-add-login
+      placeholder: feature/<issue-number>-short-description
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checklist
+      options:
+        - label: I have assigned this issue to a milestone
+          required: true
+        - label: This is small enough to land as one PR (otherwise split into sub-issues)
+          required: true

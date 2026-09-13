@@ -1,0 +1,50 @@
+name: Sync labels
+
+on:
+  push:
+    branches: [dev]
+    paths: [".github/labels.yml"]
+  workflow_dispatch:
+
+permissions:
+  issues: write
+  contents: read
+
+jobs:
+  sync:
+    name: Apply the label taxonomy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Create or update labels
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY' > labels.json
+          import json, re, sys
+          labels, cur = [], None
+          for line in open('.github/labels.yml'):
+              line = line.rstrip('\n')
+              if line.startswith('- name:'):
+                  cur = {'name': line.split(':', 1)[1].strip().strip('"')}
+                  labels.append(cur)
+              elif cur and re.match(r'\s+(color|description):', line):
+                  k, v = line.strip().split(':', 1)
+                  cur[k] = v.strip().strip('"')
+          json.dump(labels, sys.stdout)
+          PY
+
+          jq -c '.[]' labels.json | while read -r label; do
+            name="$(printf '%s' "$label" | jq -r '.name')"
+            color="$(printf '%s' "$label" | jq -r '.color')"
+            desc="$(printf '%s' "$label" | jq -r '.description // ""')"
+            if gh label list --limit 200 --json name --jq '.[].name' | grep -Fxq "$name"; then
+              gh label edit "$name" --color "$color" --description "$desc"
+              echo "updated $name"
+            else
+              gh label create "$name" --color "$color" --description "$desc"
+              echo "created $name"
+            fi
+          done

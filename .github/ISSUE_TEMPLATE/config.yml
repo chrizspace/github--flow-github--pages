@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Branching, versioning and release process
+    url: https://github.com/chrizspace/github--flow-github--pages/blob/dev/docs/DEVOPS.md
+    about: How branches, versions, milestones and deploys work in this repository.

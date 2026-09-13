@@ -1,0 +1,9 @@
+# Review is required for code quality — never for the version number,
+# which is computed automatically.
+
+*                       @chrizspace
+
+# Release automation: changes here affect every environment.
+/.github/workflows/     @chrizspace
+/.github/actions/       @chrizspace
+/scripts/               @chrizspace

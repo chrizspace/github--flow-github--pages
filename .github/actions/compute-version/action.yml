@@ -1,0 +1,115 @@
+name: Compute version
+description: >-
+  Computes the current MAJOR.MINOR.PATCH from git tags + GitHub Issues state.
+  Nothing is stored in the repository; the number is always re-derived.
+
+inputs:
+  token:
+    description: GitHub token used for the Issues/Search API lookups.
+    required: true
+  bump:
+    description: >-
+      Which segment to bump relative to the latest release tag:
+      "patch" (default, count-based), "minor" or "major".
+    required: false
+    default: patch
+  rc:
+    description: >-
+      When set to "true", append an -rc.<n> suffix (n = next unused rc for the
+      computed version).
+    required: false
+    default: "false"
+
+outputs:
+  version:
+    description: Computed version without a leading "v" (e.g. 1.8.0 or 1.8.0-rc.1).
+    value: ${{ steps.compute.outputs.version }}
+  tag:
+    description: Computed tag, i.e. "v" + version.
+    value: ${{ steps.compute.outputs.tag }}
+  major:
+    description: MAJOR segment.
+    value: ${{ steps.compute.outputs.major }}
+  minor:
+    description: MINOR segment.
+    value: ${{ steps.compute.outputs.minor }}
+  patch:
+    description: PATCH segment.
+    value: ${{ steps.compute.outputs.patch }}
+  base_tag:
+    description: The latest MAJOR.MINOR.0 release tag the computation started from.
+    value: ${{ steps.compute.outputs.base_tag }}
+
+runs:
+  using: composite
+  steps:
+    - name: Compute version
+      id: compute
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.token }}
+        BUMP: ${{ inputs.bump }}
+        RC: ${{ inputs.rc }}
+        REPO: ${{ github.repository }}
+      run: |
+        set -euo pipefail
+
+        # 1. Latest release tag (a MAJOR.MINOR.0 set by a milestone closure).
+        git fetch --tags --force --quiet || true
+        base_tag="$(git tag --list 'v[0-9]*.[0-9]*.0' --sort=-v:refname | head -n 1 || true)"
+        if [ -z "$base_tag" ]; then
+          base_tag="v0.0.0"
+          base_date="1970-01-01"
+          echo "No release tag found; starting from v0.0.0."
+        else
+          base_date="$(git log -1 --format=%cs "$base_tag")"
+        fi
+
+        base="${base_tag#v}"
+        major="${base%%.*}"
+        rest="${base#*.}"
+        minor="${rest%%.*}"
+
+        case "$BUMP" in
+          major)
+            major=$((major + 1)); minor=0; patch=0 ;;
+          minor)
+            minor=$((minor + 1)); patch=0 ;;
+          patch)
+            # 2. Count PATCH-eligible issues closed as completed after the base tag.
+            query="repo:${REPO} is:issue is:closed reason:completed closed:>=${base_date}"
+            patch="$(gh api -X GET search/issues \
+              -f q="$query" -f per_page=1 --jq '.total_count' 2>/dev/null || echo 0)"
+            ;;
+          *)
+            echo "::error::Unknown bump input '$BUMP' (expected patch|minor|major)"; exit 1 ;;
+        esac
+
+        version="${major}.${minor}.${patch}"
+
+        if [ "$RC" = "true" ]; then
+          n=1
+          while git rev-parse -q --verify "refs/tags/v${version}-rc.${n}" >/dev/null 2>&1; do
+            n=$((n + 1))
+          done
+          version="${version}-rc.${n}"
+        fi
+
+        {
+          echo "version=${version}"
+          echo "tag=v${version}"
+          echo "major=${major}"
+          echo "minor=${minor}"
+          echo "patch=${patch}"
+          echo "base_tag=${base_tag}"
+        } >> "$GITHUB_OUTPUT"
+
+        {
+          echo "### Computed version"
+          echo ""
+          echo "| field | value |"
+          echo "|---|---|"
+          echo "| base tag | \`${base_tag}\` |"
+          echo "| bump | \`${BUMP}\` |"
+          echo "| version | \`${version}\` |"
+        } >> "$GITHUB_STEP_SUMMARY"

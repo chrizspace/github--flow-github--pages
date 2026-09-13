@@ -1,0 +1,149 @@
+name: Promote to prod
+
+# The one deliberate manual step in the whole pipeline. It never asks for a
+# version number: it finalizes the release candidate that already exists on the
+# release branch.
+on:
+  workflow_dispatch:
+    inputs:
+      rc_tag:
+        description: >-
+          Release candidate tag to promote (e.g. v1.8.0-rc.2). Leave empty to
+          use the newest RC on the release branch.
+        required: false
+        default: ""
+
+permissions:
+  contents: write
+  pull-requests: read
+
+concurrency:
+  group: promote-to-prod
+  cancel-in-progress: false
+
+jobs:
+  promote:
+    name: Finalize, release and deploy to production
+    runs-on: ubuntu-latest
+    # Required reviewers on this environment decide who may click the button.
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: release
+          fetch-depth: 0
+
+      - name: Resolve the release candidate
+        id: rc
+        env:
+          INPUT_TAG: ${{ inputs.rc_tag }}
+        run: |
+          set -euo pipefail
+          git fetch --tags --force --quiet
+
+          rc="${INPUT_TAG}"
+          if [ -z "$rc" ]; then
+            rc="$(git tag --list 'v*-rc.*' --merged origin/release --sort=-creatordate | head -n 1 || true)"
+          fi
+          if [ -z "$rc" ]; then
+            echo "::error::No release candidate tag found on release. Close a milestone first."
+            exit 1
+          fi
+          if ! git rev-parse -q --verify "refs/tags/${rc}" >/dev/null; then
+            echo "::error::Tag ${rc} does not exist."; exit 1
+          fi
+
+          final="${rc%%-rc.*}"
+          if git rev-parse -q --verify "refs/tags/${final}" >/dev/null; then
+            echo "::error::Final tag ${final} already exists — ${rc} was promoted already."
+            exit 1
+          fi
+
+          {
+            echo "rc_tag=${rc}"
+            echo "tag=${final}"
+            echo "version=${final#v}"
+            echo "sha=$(git rev-list -n 1 "${rc}")"
+          } >> "$GITHUB_OUTPUT"
+          echo "Promoting ${rc} as ${final}."
+
+      - name: Verify RC checks are green
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SHA: ${{ steps.rc.outputs.sha }}
+        run: |
+          set -euo pipefail
+          state="$(gh api "repos/${GITHUB_REPOSITORY}/commits/${SHA}/check-runs" \
+            --jq '[.check_runs[] | select(.status == "completed") | .conclusion]
+                  | map(select(. != "success" and . != "skipped" and . != "neutral"))
+                  | length')"
+          if [ "${state:-0}" -gt 0 ]; then
+            echo "::error::Release candidate has failing checks — refusing to promote."
+            exit 1
+          fi
+          echo "RC checks green (or none reported)."
+
+      - name: Merge release into prod
+        env:
+          VERSION: ${{ steps.rc.outputs.version }}
+        run: |
+          set -euo pipefail
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git checkout -B prod origin/prod
+          git merge --no-ff origin/release -m "Promote release to prod for ${VERSION}"
+          git push origin prod
+
+      - name: Finalize the tag
+        env:
+          TAG: ${{ steps.rc.outputs.tag }}
+          RC: ${{ steps.rc.outputs.rc_tag }}
+        run: |
+          set -euo pipefail
+          git tag -a "${TAG}" -m "Release ${TAG} (finalized from ${RC})"
+          git push origin "${TAG}"
+
+      - name: Deploy to Cloudflare Pages (Production)
+        id: deploy
+        uses: ./.github/actions/deploy-pages
+        with:
+          project_name: ${{ vars.CLOUDFLARE_PROJECT_NAME || github.event.repository.name }}
+          branch: prod
+          environment: production
+          version: ${{ steps.rc.outputs.version }}
+          tag: ${{ steps.rc.outputs.tag }}
+          commit: ${{ github.sha }}
+          api_token: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          account_id: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+
+      - name: Publish the GitHub Release (the announcement)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.rc.outputs.tag }}
+          RC: ${{ steps.rc.outputs.rc_tag }}
+          VERSION: ${{ steps.rc.outputs.version }}
+          URL: ${{ steps.deploy.outputs.url }}
+        run: |
+          set -euo pipefail
+
+          notes="$(gh release view "${RC}" --json body --jq '.body' 2>/dev/null || echo "Release ${VERSION}.")"
+          if [ -n "${URL}" ]; then
+            notes="${notes}"$'\n\n'"Deployed to ${URL}"
+          fi
+
+          printf '%s\n' "$notes" > final-notes.md
+          gh release create "${TAG}" \
+            --target prod \
+            --title "${VERSION}" \
+            --notes-file final-notes.md \
+            --latest
+
+          # The RC draft has served its purpose.
+          gh release delete "${RC}" --yes --cleanup-tag=false 2>/dev/null || true
+
+          {
+            echo "### 🚀 Released ${VERSION}"
+            echo ""
+            echo "Tag \`${TAG}\` published and deployed to production."
+          } >> "$GITHUB_STEP_SUMMARY"

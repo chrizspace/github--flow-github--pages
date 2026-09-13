@@ -1,0 +1,138 @@
+name: Hotfix
+
+# Same issues.closed trigger as dev-integration.yml, but the type:hotfix label
+# routes the work straight to prod and opens the backport PRs.
+on:
+  issues:
+    types: [closed]
+
+permissions:
+  contents: write
+  issues: read
+  pull-requests: write
+
+concurrency:
+  group: hotfix
+  cancel-in-progress: false
+
+jobs:
+  hotfix-release:
+    name: PATCH bump and deploy to Prod
+    if: >-
+      github.event.issue.state_reason == 'completed' &&
+      contains(toJSON(github.event.issue.labels.*.name), 'type:hotfix')
+    runs-on: ubuntu-latest
+    environment: production
+    outputs:
+      sha: ${{ steps.pr.outputs.sha }}
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      # Needed before any local composite action can be used.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Resolve the merged PR that closed the issue
+        id: pr
+        uses: ./.github/actions/resolve-closing-pr
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          issue_number: ${{ github.event.issue.number }}
+          expected_base: prod
+
+      - name: Check out the exact merge commit
+        run: git checkout --detach ${{ steps.pr.outputs.sha }}
+
+      - name: Compute version
+        id: version
+        uses: ./.github/actions/compute-version
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          bump: patch
+
+      - name: Tag the hotfix commit
+        env:
+          TAG: ${{ steps.version.outputs.tag }}
+          SHA: ${{ steps.pr.outputs.sha }}
+        run: |
+          set -euo pipefail
+          if git rev-parse -q --verify "refs/tags/${TAG}" >/dev/null; then
+            echo "::warning::Tag ${TAG} already exists — not re-tagging."
+            exit 0
+          fi
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "${TAG}" "${SHA}" -m "Hotfix ${TAG} — closes #${{ github.event.issue.number }}"
+          git push origin "${TAG}"
+
+      - name: Deploy to Cloudflare Pages (Prod)
+        uses: ./.github/actions/deploy-pages
+        with:
+          project_name: ${{ vars.CLOUDFLARE_PROJECT_NAME || github.event.repository.name }}
+          branch: prod
+          environment: production
+          version: ${{ steps.version.outputs.version }}
+          tag: ${{ steps.version.outputs.tag }}
+          commit: ${{ steps.pr.outputs.sha }}
+          api_token: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          account_id: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+
+  backport:
+    name: Backport to ${{ matrix.target }}
+    needs: hotfix-release
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [release, dev]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Open backport PR
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TARGET: ${{ matrix.target }}
+          SHA: ${{ needs.hotfix-release.outputs.sha }}
+          ISSUE: ${{ github.event.issue.number }}
+        run: |
+          set -euo pipefail
+          branch="backport/${ISSUE}-to-${TARGET}"
+
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git checkout -B "$branch" "origin/${TARGET}"
+
+          if git merge-base --is-ancestor "$SHA^2" "$SHA" 2>/dev/null; then
+            pick=(git cherry-pick -m 1 "$SHA")   # merge commit
+          else
+            pick=(git cherry-pick "$SHA")
+          fi
+
+          if "${pick[@]}"; then
+            echo "Cherry-pick clean."
+          else
+            git cherry-pick --abort 2>/dev/null || true
+            echo "::warning::Hotfix ${SHA} does not cherry-pick cleanly onto ${TARGET}; a manual backport is required."
+            exit 0
+          fi
+
+          git push --force-with-lease origin "$branch"
+
+          # The body deliberately contains no closing keyword: backports must
+          # never fire another issues.closed event, so they never bump a version.
+          # shellcheck disable=SC2016  # printf format placeholders must stay literal
+          {
+            printf 'Automated backport of the hotfix for issue #%s (commit `%s`) so `%s` does not drift from `prod`.\n\n' \
+              "$ISSUE" "$SHA" "$TARGET"
+            printf 'No closing keyword on purpose: backports do not close an issue and therefore do not bump the version.\n'
+          } > backport-body.md
+
+          gh pr create \
+            --base "$TARGET" \
+            --head "$branch" \
+            --title "Backport hotfix for #${ISSUE} to ${TARGET}" \
+            --body-file backport-body.md \
+            --label backport || echo "::warning::Backport PR already exists."

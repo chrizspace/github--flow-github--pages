@@ -1,0 +1,102 @@
+name: Resolve closing pull request
+description: >-
+  Given an issue number, finds the merged pull request that closed it and
+  returns its merge commit SHA and base branch. Fails when no merged PR is
+  found, which guards against issues manually closed as "completed".
+
+inputs:
+  token:
+    description: GitHub token.
+    required: true
+  issue_number:
+    description: Issue number that was closed.
+    required: true
+  expected_base:
+    description: >-
+      Optional branch name the closing PR must have merged into (e.g. dev or
+      prod). When set and it does not match, the action fails.
+    required: false
+    default: ""
+
+outputs:
+  sha:
+    description: Merge commit SHA of the PR that closed the issue.
+    value: ${{ steps.resolve.outputs.sha }}
+  pr_number:
+    description: Number of the merged pull request.
+    value: ${{ steps.resolve.outputs.pr_number }}
+  base_ref:
+    description: Branch the pull request was merged into.
+    value: ${{ steps.resolve.outputs.base_ref }}
+
+runs:
+  using: composite
+  steps:
+    - name: Resolve
+      id: resolve
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.token }}
+        REPO: ${{ github.repository }}
+        ISSUE: ${{ inputs.issue_number }}
+        EXPECTED_BASE: ${{ inputs.expected_base }}
+      run: |
+        set -euo pipefail
+
+        pr="$(gh api graphql -f query='
+          query($owner:String!, $repo:String!, $number:Int!) {
+            repository(owner:$owner, name:$repo) {
+              issue(number:$number) {
+                timelineItems(last:50, itemTypes:[CLOSED_EVENT, CROSS_REFERENCED_EVENT]) {
+                  nodes {
+                    ... on ClosedEvent {
+                      closer {
+                        ... on PullRequest {
+                          number merged baseRefName mergeCommit { oid }
+                        }
+                      }
+                    }
+                    ... on CrossReferencedEvent {
+                      source {
+                        ... on PullRequest {
+                          number merged baseRefName mergeCommit { oid }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }' \
+          -F owner="${REPO%%/*}" -F repo="${REPO##*/}" -F number="$ISSUE" \
+          --jq '[.data.repository.issue.timelineItems.nodes[]
+                 | (.closer // .source)
+                 | select(. != null and .merged == true)]
+                | last')"
+
+        if [ -z "$pr" ] || [ "$pr" = "null" ]; then
+          echo "::error::Issue #${ISSUE} was closed as completed but no merged pull request references it."
+          exit 1
+        fi
+
+        sha="$(printf '%s' "$pr" | jq -r '.mergeCommit.oid // empty')"
+        base="$(printf '%s' "$pr" | jq -r '.baseRefName')"
+        num="$(printf '%s' "$pr" | jq -r '.number')"
+
+        if [ -z "$sha" ]; then
+          echo "::error::Merged PR #${num} has no merge commit SHA."
+          exit 1
+        fi
+
+        if [ -n "$EXPECTED_BASE" ] && [ "$base" != "$EXPECTED_BASE" ]; then
+          echo "::error::PR #${num} merged into '${base}', expected '${EXPECTED_BASE}'."
+          exit 1
+        fi
+
+        {
+          echo "sha=${sha}"
+          echo "pr_number=${num}"
+          echo "base_ref=${base}"
+        } >> "$GITHUB_OUTPUT"
+
+        echo "Issue #${ISSUE} closed by PR #${num} (${base} @ ${sha})."

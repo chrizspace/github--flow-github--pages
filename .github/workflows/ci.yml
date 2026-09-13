@@ -1,0 +1,140 @@
+name: CI
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, edited, ready_for_review, labeled, unlabeled]
+    branches: [dev, release, prod]
+
+permissions:
+  contents: read
+  issues: read
+  pull-requests: read
+
+concurrency:
+  group: ci-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  linked-issue:
+    name: Linked issue has a milestone
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check linked issue and milestone
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_LABELS: ${{ toJSON(github.event.pull_request.labels.*.name) }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: |
+          set -euo pipefail
+
+          if printf '%s' "$PR_LABELS" | grep -q '"backport"'; then
+            echo "Backport PR — linked-issue requirement intentionally skipped."
+            exit 0
+          fi
+
+          # Issues closed by this PR, as GitHub itself resolved them.
+          # shellcheck disable=SC2016  # GraphQL variables must stay literal
+          issues="$(gh api graphql -f query='
+            query($owner:String!, $repo:String!, $number:Int!) {
+              repository(owner:$owner, name:$repo) {
+                pullRequest(number:$number) {
+                  closingIssuesReferences(first:20) {
+                    nodes { number title milestone { title } }
+                  }
+                }
+              }
+            }' \
+            -F owner="${REPO%%/*}" -F repo="${REPO##*/}" -F number="$PR_NUMBER" \
+            --jq '.data.repository.pullRequest.closingIssuesReferences.nodes')"
+
+          count="$(printf '%s' "$issues" | jq 'length')"
+          if [ "$count" -eq 0 ]; then
+            echo "::error::This PR closes no issue. Add a closing keyword such as 'Closes #123' to the PR description."
+            echo "Hint: PR body currently is:" && printf '%s\n' "$PR_BODY"
+            exit 1
+          fi
+
+          missing="$(printf '%s' "$issues" | jq -r '.[] | select(.milestone == null) | "#\(.number) \(.title)"')"
+          if [ -n "$missing" ]; then
+            echo "::error::Linked issue(s) have no milestone assigned:"
+            printf '%s\n' "$missing"
+            exit 1
+          fi
+
+          printf '%s' "$issues" | jq -r '.[] | "OK — #\(.number) \(.title) [milestone: \(.milestone.title)]"'
+
+  branch-name:
+    name: Branch naming convention
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate head branch name
+        env:
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+        run: |
+          set -euo pipefail
+          echo "PR: $HEAD_REF -> $BASE_REF"
+
+          case "$BASE_REF" in
+            dev)
+              case "$HEAD_REF" in
+                feature/[0-9]*-*|fix/[0-9]*-*|backport/*|hotfix/[0-9]*-*) ;;
+                *) echo "::error::Branches merging into dev must be named feature/<issue>-desc or fix/<issue>-desc (got '$HEAD_REF')"; exit 1 ;;
+              esac ;;
+            release)
+              case "$HEAD_REF" in
+                dev|backport/*|hotfix/[0-9]*-*) ;;
+                *) echo "::error::release only accepts PRs from dev or hotfix backports (got '$HEAD_REF')"; exit 1 ;;
+              esac ;;
+            prod)
+              case "$HEAD_REF" in
+                release|hotfix/[0-9]*-*) ;;
+                *) echo "::error::prod only accepts PRs from release or hotfix/* (got '$HEAD_REF')"; exit 1 ;;
+              esac ;;
+          esac
+          echo "Branch name OK."
+
+  build:
+    name: Lint, test and build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Shell lint
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck
+          shellcheck build.sh scripts/*.sh
+
+      - name: JS syntax check
+        run: node --check src/app.js
+
+      - name: HTML sanity check
+        run: |
+          set -euo pipefail
+          for f in src/*.html; do
+            grep -q '<!DOCTYPE html>' "$f" || { echo "::error::$f missing doctype"; exit 1; }
+          done
+          echo "HTML OK."
+
+      - name: Build
+        env:
+          ENVIRONMENT: preview
+          BRANCH: ${{ github.event.pull_request.head.ref }}
+          COMMIT: ${{ github.event.pull_request.head.sha }}
+        run: ./build.sh
+
+      - name: Verify build output
+        run: |
+          set -euo pipefail
+          test -f dist/index.html
+          test -f dist/version.json
+          jq -e '.version and .commit and .branch' dist/version.json > /dev/null
+          cat dist/version.json
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: site-preview
+          path: dist
+          retention-days: 7

@@ -1,0 +1,170 @@
+name: Milestone release
+
+# Closing a milestone is the release event: it computes MINOR (or MAJOR for a
+# "Major: " prefixed milestone), promotes dev -> release, tags an RC and ships
+# it to UAT. No human types a version number.
+on:
+  milestone:
+    types: [closed]
+  workflow_dispatch:
+    inputs:
+      milestone_title:
+        description: Milestone title to release (for manual re-runs).
+        required: true
+
+permissions:
+  contents: write
+  issues: read
+  pull-requests: write
+
+concurrency:
+  group: milestone-release
+  cancel-in-progress: false
+
+jobs:
+  release-candidate:
+    name: Bump, promote to release and deploy UAT
+    runs-on: ubuntu-latest
+    environment: uat
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: dev
+          fetch-depth: 0
+
+      - name: Determine milestone and bump type
+        id: milestone
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TITLE: ${{ github.event.milestone.title || inputs.milestone_title }}
+          NUMBER: ${{ github.event.milestone.number }}
+        run: |
+          set -euo pipefail
+
+          number="${NUMBER:-}"
+          if [ -z "$number" ]; then
+            number="$(gh api "repos/${GITHUB_REPOSITORY}/milestones?state=all&per_page=100" \
+              --jq "[.[] | select(.title == \"${TITLE}\")] | last | .number")"
+            if [ -z "$number" ] || [ "$number" = "null" ]; then
+              echo "::error::No milestone titled '${TITLE}' found."; exit 1
+            fi
+          fi
+
+          case "$TITLE" in
+            Major:*) bump=major ;;
+            *)       bump=minor ;;
+          esac
+
+          {
+            echo "number=${number}"
+            echo "title=${TITLE}"
+            echo "bump=${bump}"
+          } >> "$GITHUB_OUTPUT"
+          echo "Milestone '${TITLE}' (#${number}) -> ${bump} bump."
+
+      - name: Compute release candidate version
+        id: version
+        uses: ./.github/actions/compute-version
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          bump: ${{ steps.milestone.outputs.bump }}
+          rc: "true"
+
+      - name: Merge dev into release
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git checkout -B release origin/release
+          # Merge commit on purpose — the promotion history is what the
+          # versioning and changelog tooling reads.
+          git merge --no-ff origin/dev -m "Promote dev to release for ${VERSION}"
+          git push origin release
+
+      - name: Tag the release candidate
+        env:
+          TAG: ${{ steps.version.outputs.tag }}
+          TITLE: ${{ steps.milestone.outputs.title }}
+        run: |
+          set -euo pipefail
+          git tag -a "${TAG}" -m "Release candidate ${TAG} for milestone: ${TITLE}"
+          git push origin "${TAG}"
+
+      - name: Build categorized release notes
+        id: notes
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          MILESTONE: ${{ steps.milestone.outputs.number }}
+          TITLE: ${{ steps.milestone.outputs.title }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+
+          issues="$(gh api "repos/${GITHUB_REPOSITORY}/issues?milestone=${MILESTONE}&state=all&per_page=100" \
+            --jq '[.[] | select(.pull_request == null)]')"
+
+          section() {
+            local label="$1" heading="$2"
+            local body
+            body="$(printf '%s' "$issues" \
+              | jq -r --arg l "$label" '.[] | select([.labels[].name] | index($l)) | "- \(.title) (#\(.number))"')"
+            if [ -n "$body" ]; then
+              printf '\n### %s\n%s\n' "$heading" "$body"
+            fi
+          }
+
+          {
+            printf '## %s — %s\n' "$VERSION" "$TITLE"
+            section "type:feature" "✨ Features"
+            section "type:fix" "🐛 Fixes"
+            section "type:hotfix" "🚑 Hotfixes"
+            printf '\n_Generated from milestone **%s**. Version computed automatically — never typed by hand._\n' "$TITLE"
+          } > release-notes.md
+
+          cat release-notes.md
+
+      - name: Draft the GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.version.outputs.tag }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          gh release create "${TAG}" \
+            --draft \
+            --prerelease \
+            --target release \
+            --title "${VERSION}" \
+            --notes-file release-notes.md
+
+      - name: Deploy to Cloudflare Pages (UAT)
+        uses: ./.github/actions/deploy-pages
+        with:
+          project_name: ${{ vars.CLOUDFLARE_PROJECT_NAME || github.event.repository.name }}
+          branch: release
+          environment: uat
+          version: ${{ steps.version.outputs.version }}
+          tag: ${{ steps.version.outputs.tag }}
+          commit: ${{ github.sha }}
+          api_token: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          account_id: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+
+      - name: Smoke test UAT build
+        run: |
+          set -euo pipefail
+          jq -e '.environment == "uat" and .version != ""' dist/version.json > /dev/null
+          echo "UAT artifact OK."
+
+      - name: Next step
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          {
+            echo "### Awaiting promotion"
+            echo ""
+            echo "\`${VERSION}\` is live on UAT. When it looks good, run the"
+            echo "**Promote to prod** workflow — the single manual step in the pipeline."
+          } >> "$GITHUB_STEP_SUMMARY"
