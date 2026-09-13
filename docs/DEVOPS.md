@@ -79,17 +79,37 @@ will build outside the milestone/manual-gate timing this pipeline is built on.
 
 ## Required manual setup
 
-Run `./scripts/setup-repo.sh` for branches, default branch, protection and
-labels. Then, in the GitHub UI:
+Run `./scripts/setup-repo.sh`. It creates `dev`/`release`/`prod`, sets `dev` as
+the default branch, enables head-branch deletion, applies branch protection,
+syncs labels, creates the `dev`/`uat`/`production` environments (with the repo
+owner as required reviewer on `production`) and seeds a `Sprint 1` milestone.
+It is idempotent — re-run it any time.
 
-1. **Settings → Environments**: create `dev`, `uat`, `production`.
-   Add **required reviewers** to `production` — that list decides who may click
-   *Promote to prod*.
-2. **Secrets** per environment: `CLOUDFLARE_API_TOKEN` (Pages:Edit) and
+> **Private repository on a free plan:** GitHub rejects branch protection and
+> environment protection rules. The script warns and continues; everything else
+> still applies. Make the repository public (or upgrade the plan) and re-run the
+> script to get the protection rules and the production approval gate:
+>
+> ```bash
+> gh repo edit --visibility public --accept-visibility-change-consequences
+> ./scripts/setup-repo.sh
+> ```
+>
+> Until then, *Promote to prod* is runnable by anyone with push access — the
+> gate exists but is not enforced.
+
+Then, still manually:
+
+1. **Secrets** per environment: `CLOUDFLARE_API_TOKEN` (Pages:Edit) and
    `CLOUDFLARE_ACCOUNT_ID`. The production token must not be visible to `dev`.
-3. Optional repository **variable** `CLOUDFLARE_PROJECT_NAME` (defaults to the
+
+   ```bash
+   gh secret set CLOUDFLARE_API_TOKEN  --env production
+   gh secret set CLOUDFLARE_ACCOUNT_ID --env production   # repeat for dev, uat
+   ```
+2. Optional repository **variable** `CLOUDFLARE_PROJECT_NAME` (defaults to the
    repository name).
-4. Create the Cloudflare Pages project and attach the production domain to the
+3. Create the Cloudflare Pages project and attach the production domain to the
    production environment only.
 
 Until the Cloudflare secrets exist, deploy steps log a warning and skip — the

@@ -33,8 +33,10 @@ gh api -X PATCH "repos/${REPO}" -F delete_branch_on_merge=true >/dev/null
 
 protect() {
   local branch="$1" reviews="$2"
-  gh api -X PUT "repos/${REPO}/branches/${branch}/protection" \
-    --input - >/dev/null <<JSON
+  # Branch protection needs a public repository or a paid plan; a 403 here is
+  # not fatal, the rest of the setup still applies.
+  if ! gh api -X PUT "repos/${REPO}/branches/${branch}/protection" \
+    --input - >/dev/null 2>&1 <<JSON
 {
   "required_status_checks": {
     "strict": true,
@@ -56,6 +58,10 @@ protect() {
   "required_linear_history": false
 }
 JSON
+  then
+    echo "  ⚠ could not protect ${branch} — branch protection requires a public repository or a paid plan"
+    return 0
+  fi
   echo "  protected ${branch}"
 }
 
@@ -81,6 +87,27 @@ while IFS= read -r line; do
   esac
 done < .github/labels.yml
 
+say "Creating deployment environments"
+owner_id="$(gh api "repos/${REPO}" --jq .owner.id)"
+owner_type="$(gh api "repos/${REPO}" --jq .owner.type)"
+reviewer_type="User"; [ "$owner_type" = "Organization" ] && reviewer_type="Team"
+
+for env in dev uat production; do
+  if [ "$env" = "production" ]; then
+    # Required reviewers are what gate the promote-to-prod button.
+    body="{\"reviewers\":[{\"type\":\"${reviewer_type}\",\"id\":${owner_id}}],\"deployment_branch_policy\":{\"protected_branches\":false,\"custom_branch_policies\":true}}"
+  else
+    body='{"deployment_branch_policy":null}'
+  fi
+  if printf '%s' "$body" | gh api -X PUT "repos/${REPO}/environments/${env}" --input - >/dev/null 2>&1; then
+    echo "  created ${env}"
+  else
+    gh api -X PUT "repos/${REPO}/environments/${env}" >/dev/null 2>&1 \
+      && echo "  created ${env} (without protection rules — requires a public repository or a paid plan)" \
+      || echo "  ⚠ could not create ${env}"
+  fi
+done
+
 say "Creating a sample milestone"
 if gh api "repos/${REPO}/milestones?state=all" --jq '.[].title' | grep -Fxq "Sprint 1"; then
   echo "  Sprint 1 already exists"
@@ -95,13 +122,15 @@ cat <<'NEXT'
 
 ==> Done. Remaining manual steps (not scriptable from files):
 
-  1. Settings > Environments: create `dev`, `uat` and `production`.
-     Add required reviewers to `production` — they gate the promote button.
-  2. Add CLOUDFLARE_API_TOKEN (Pages:Edit) and CLOUDFLARE_ACCOUNT_ID as
-     secrets, scoped per environment.
-  3. Optionally set the repository variable CLOUDFLARE_PROJECT_NAME.
-  4. Create the Cloudflare Pages project, set its production branch to `prod`,
+  1. Add CLOUDFLARE_API_TOKEN (Pages:Edit) and CLOUDFLARE_ACCOUNT_ID as
+     environment secrets on `dev`, `uat` and `production`:
+       gh secret set CLOUDFLARE_API_TOKEN --env production
+       gh secret set CLOUDFLARE_ACCOUNT_ID --env production
+  2. Optionally set the repository variable CLOUDFLARE_PROJECT_NAME.
+  3. Create the Cloudflare Pages project, set its production branch to `prod`,
      and disable its own "deploy on push" Git integration.
+  4. If branch protection or environment reviewers were skipped above, make the
+     repository public or upgrade the plan, then re-run this script.
 
   See docs/DEVOPS.md for details.
 NEXT
