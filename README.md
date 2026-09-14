@@ -20,8 +20,12 @@ hotfix/* ─┴─────────────────────�
 ## Quick start
 
 ```bash
-./scripts/setup-repo.sh     # branches, default branch, protection, labels
-./build.sh                  # build the status page into dist/
+./scripts/setup-repo.sh          # branches, default branch, protection, labels, environments
+
+CLOUDFLARE_API_TOKEN=... CLOUDFLARE_ACCOUNT_ID=... \
+  ./scripts/setup-cloudflare.sh  # Pages project + environment secrets
+
+./build.sh                       # build the status page into dist/
 python3 -m http.server -d dist 8080
 ```
 
@@ -39,4 +43,5 @@ python3 -m http.server -d dist 8080
 src/                 the static status page
 build.sh             emits dist/ + dist/version.json
 scripts/setup-repo.sh
+scripts/setup-cloudflare.sh
 ```

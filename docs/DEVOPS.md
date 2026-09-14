@@ -85,32 +85,31 @@ syncs labels, creates the `dev`/`uat`/`production` environments (with the repo
 owner as required reviewer on `production`) and seeds a `Sprint 1` milestone.
 It is idempotent — re-run it any time.
 
-> **Private repository on a free plan:** GitHub rejects branch protection and
-> environment protection rules. The script warns and continues; everything else
-> still applies. Make the repository public (or upgrade the plan) and re-run the
-> script to get the protection rules and the production approval gate:
+> **Note:** branch protection and environment protection rules require a public
+> repository or a paid plan. If they were skipped when you ran the script,
+> make the repository public and re-run it:
 >
 > ```bash
 > gh repo edit --visibility public --accept-visibility-change-consequences
 > ./scripts/setup-repo.sh
 > ```
->
-> Until then, *Promote to prod* is runnable by anyone with push access — the
-> gate exists but is not enforced.
 
-Then, still manually:
+Then wire up Cloudflare with one command:
 
-1. **Secrets** per environment: `CLOUDFLARE_API_TOKEN` (Pages:Edit) and
-   `CLOUDFLARE_ACCOUNT_ID`. The production token must not be visible to `dev`.
+```bash
+CLOUDFLARE_API_TOKEN=<Pages:Edit token> \
+CLOUDFLARE_ACCOUNT_ID=<account id> \
+./scripts/setup-cloudflare.sh
+```
 
-   ```bash
-   gh secret set CLOUDFLARE_API_TOKEN  --env production
-   gh secret set CLOUDFLARE_ACCOUNT_ID --env production   # repeat for dev, uat
-   ```
-2. Optional repository **variable** `CLOUDFLARE_PROJECT_NAME` (defaults to the
-   repository name).
-3. Create the Cloudflare Pages project and attach the production domain to the
-   production environment only.
+It creates the Pages project with `prod` as the production branch (no Git
+connection, so Cloudflare never builds on push), and stores both values as
+environment secrets on `dev`, `uat` and `production`. Create the token at
+<https://dash.cloudflare.com/profile/api-tokens>; the account ID is on the
+right-hand side of any Cloudflare dashboard page.
+
+Optional: the repository variable `CLOUDFLARE_PROJECT_NAME` controls the
+project name (defaults to the repository name).
 
 Until the Cloudflare secrets exist, deploy steps log a warning and skip — the
 rest of the version pipeline still runs, so you can test it immediately.
